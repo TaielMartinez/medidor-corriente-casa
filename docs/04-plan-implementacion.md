@@ -74,7 +74,7 @@
 
 - [ ] Instalar SCT en tablero Casa 1 (fase única).
 - [ ] Instalar SCT en tablero Casa 2.
-- [ ] Fijar caja del ESP; alimentación USB permanente.
+- [ ] Fijar caja del ESP en ubicación definitiva.
 - [ ] Calibración con medidor de referencia 24 h.
 - [ ] Verificar histórico al día siguiente vía `/api/daily`.
 

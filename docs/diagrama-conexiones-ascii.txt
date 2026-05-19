@@ -20,7 +20,7 @@ MEDIDOR 2 CASAS — ESP32-C3 + 2× SCT-013
                ▼ GPIO0 (ADC)                         ▼ GPIO1 (ADC)
         ┌──────────────────────────────────────────────────────┐
         │              ESP32-C3 SuperMini                        │
-        │   [USB-C 5V]  [WiFi]  [LittleFS flash interna]       │
+        │   [WiFi]  [LittleFS flash interna]                     │
         └──────────────────────────┬───────────────────────────┘
                                    │ WiFi 2.4 GHz
                                    ▼
@@ -33,4 +33,3 @@ MEDIDOR 2 CASAS — ESP32-C3 + 2× SCT-013
                     ▼              ▼              ▼
               Navegador      curl / scripts    (futuro: HA)
 
-  Alimentación: cargador USB 5V (no compartir borne con fase medida si es posible).
