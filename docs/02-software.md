@@ -1,214 +1,327 @@
 # Software
 
-## 1. Stack tecnológico
-
-| Capa | Tecnología | Motivo |
-|------|------------|--------|
-| Firmware | **Arduino framework** + board `esp32-c3-devkitm-1` | Rápido desarrollo, librerías ADC/WiFi |
-| Alternativa | ESP-IDF | Mayor control; más complejo |
-| WiFi | `WiFi.h` (modo STA) | Conexión a router doméstico |
-| Servidor HTTP | `WebServer` o `ESPAsyncWebServer` | API REST + página simple |
-| Persistencia | **LittleFS** | Archivos diarios en flash interna |
-| Tiempo | `configTime()` NTP + `time.h` | Fechas para agregados diarios |
-| JSON | `ArduinoJson` | Respuestas API y archivos |
+Firmware tipo **Savjee + EmonLib**, extendido a **dos canales** (`EnergyMonitor` × 2) en un **ESP32-C3**. Medición **cada 1 segundo** sin `delay()` en el bucle (para no bloquear el servidor HTTP).
 
 ---
 
-## 2. Arquitectura de firmware
+## 1. Stack
+
+| Componente | Uso |
+|------------|-----|
+| **Arduino** + core ESP32 | Framework |
+| **[EmonLib](https://github.com/openenergymonitor/EmonLib)** | `calcIrms()` → amperios RMS |
+| `WiFi.h` | Cliente STA |
+| `WebServer` | API REST en LAN |
+| **LittleFS** | Histórico 30 días |
+| `ArduinoJson` | Respuestas API |
+
+---
+
+## 2. Arquitectura
 
 ```mermaid
 flowchart TB
-    subgraph Loop["Bucle principal (~50 Hz muestreo)"]
-        ADC["Leer ADC Casa 1 y 2"]
-        RMS["Calcular I_rms por ventana"]
-        PWR["P = V_nom × I × cos φ"]
-        ACC["Acumular Wh en ventana"]
+    subgraph Cada1s["Cada 1000 ms (sin delay)"]
+        E1["emon1.calcIrms(1480)"]
+        E2["emon2.calcIrms(1480)"]
+        P1["P1 = I1 × V_RED"]
+        P2["P2 = I2 × V_RED"]
+        ACC["Acumular Wh casa1 y casa2"]
     end
 
-    subgraph Tasks["Tareas periódicas"]
-        MIN["Cada 1 min: promedio corriente"]
-        DAY["Cada medianoche: cerrar día"]
-        SAVE["Guardar en LittleFS"]
+    subgraph HTTP["Servidor no bloqueante"]
+        SRV["handleClient()"]
+        API["/api/status, /api/daily"]
     end
 
-    subgraph Net["Red"]
-        HTTP["WebServer :80"]
-        API["/api/..."]
+    subgraph Dia["Fin de día / cada 5 min"]
+        SAVE["LittleFS"]
     end
 
-    ADC --> RMS --> PWR --> ACC
-    ACC --> MIN --> SAVE
-    MIN --> DAY --> SAVE
-    HTTP --> API
-    SAVE --> FS[("LittleFS")]
-    API --> FS
+    E1 --> P1 --> ACC
+    E2 --> P2 --> ACC
+    ACC --> SAVE
+    SRV --> API
+    API --> SAVE
 ```
 
-### Módulos del código (estructura de carpetas futura)
+---
+
+## 3. EmonLib — dos casas, una placa
+
+### Inicialización
+
+```cpp
+#include "EmonLib.h"
+
+EnergyMonitor emon1;  // Casa 1
+EnergyMonitor emon2;  // Casa 2
+
+#define ADC_CASA1  0   // GPIO0
+#define ADC_CASA2  1   // GPIO1
+#define V_RED      220.0f
+#define CAL_CASA1  30    // Ajustar en calibración (Savjee usa 30)
+#define CAL_CASA2  30
+
+// Resolución ADC (Savjee fuerza 10 bits en ESP32 clásico)
+#define ADC_BITS    10
+#define ADC_COUNTS  (1 << ADC_BITS)
+
+void setupEmon() {
+  analogReadResolution(ADC_BITS);
+  // En ESP32-C3: configurar atenuación del canal si hace falta
+  emon1.current(ADC_CASA1, CAL_CASA1);
+  emon2.current(ADC_CASA2, CAL_CASA2);
+}
+```
+
+### Bucle principal (patrón Savjee)
+
+No usar `delay(1000)`. Medir solo si pasó 1 s desde la última muestra; el resto del tiempo atender WiFi y HTTP.
+
+```cpp
+unsigned long lastMeasure = 0;
+unsigned long setupDoneAt = 0;
+const unsigned long MEASURE_MS = 1000;
+const unsigned long STARTUP_IGNORE_MS = 10000;
+
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastMeasure >= MEASURE_MS) {
+    lastMeasure = now;
+
+  float i1 = emon1.calcIrms(1480);   // ~1 ciclo 50 Hz a alta tasa muestreo
+  float i2 = emon2.calcIrms(1480);
+
+    if (now - setupDoneAt > STARTUP_IGNORE_MS) {
+      float w1 = i1 * V_RED;
+      float w2 = i2 * V_RED;
+      registrarMuestra(1, i1, w1);
+      registrarMuestra(2, i2, w2);
+      acumularEnergia(w1, w2, 1.0f);  // delta_t = 1 s
+    }
+  }
+
+  updateStatusLed(i1, i2);  // no bloqueante; ver §8
+  server.handleClient();
+  tryReconnectWiFi();
+}
+```
+
+> **Nota:** `calcIrms` es **bloqueante** (~decenas de ms). Con dos canales, una pasada completa cada 1 s es aceptable (como en el tutorial con MQTT + medición).
+
+### Parámetro `1480`
+
+Es el número de muestras que EmonLib promedia (Savjee). En 50 Hz suele cubrir varios ciclos. Si hay inestabilidad, probar valores cercanos según [documentación EmonLib](https://github.com/openenergymonitor/EmonLib).
+
+---
+
+## 4. Cálculo de kWh diarios
+
+Igual criterio que Savjee (`watts = amps * HOME_VOLTAGE`), integrado en firmware:
+
+| Variable | Descripción |
+|----------|-------------|
+| `wh_hoy_casa1` | Wh acumulados desde medianoche |
+| `wh_hoy_casa2` | Idem casa 2 |
+| `i_max_casaN` | Máximo I_rms del día |
+
+Cada segundo:
+
+\[
+\Delta Wh = \frac{W_1 + W_2}{3600} \quad \text{(por canal por separado)}
+\]
+
+A medianoche (NTP): escribir JSON del día, resetear contadores, rotar 30 días (ver [03-almacenamiento-y-api.md](03-almacenamiento-y-api.md)).
+
+---
+
+## 5. Estructura del proyecto
 
 ```
 firmware/
+├── platformio.ini
 ├── src/
 │   ├── main.cpp
-│   ├── config.h              # WiFi, V_nominal, calibración
-│   ├── adc_sampler.cpp       # Muestreo y RMS
-│   ├── energy_meter.cpp      # Integración Wh / kWh
-│   ├── storage.cpp           # LittleFS lectura/escritura
-│   ├── web_server.cpp        # Rutas HTTP
-│   └── time_service.cpp      # NTP y fecha local
-├── data/                     # (opcional) archivos estáticos web
-└── platformio.ini            # o sketch Arduino
+│   ├── config.h           # WIFI, V_RED, CAL_CASA1/2, pines
+│   ├── measurement.cpp    # EmonLib + acumulación Wh
+│   ├── storage.cpp        # LittleFS
+│   ├── web_server.cpp     # Rutas API HTTP
+│   └── status_led.cpp     # LED rojo GPIO2
+└── lib/
+    └── EmonLib/
 ```
 
----
-
-## 3. Algoritmo de medición
-
-### 3.1 Muestreo y RMS
-
-Para cada canal, durante una ventana de **N muestras** (ej. 1 ciclo de 50 Hz → 20 ms → 1000 muestras a ~50 kHz no es viable en C3; usar **2–4 kHz** efectivos):
-
-1. Leer ADC con offset restado.
-2. Calcular \(I_{rms} = \sqrt{\frac{1}{N}\sum x_i^2}\).
-3. Aplicar factor de calibración `cal_gain` y offset `cal_offset` por canal.
-
-### 3.2 Potencia y energía
-
-\[
-P_{instantánea} = V_{nominal} \times I_{rms} \times \cos\varphi
-\]
-
-\[
-\Delta Wh = P \times \Delta t_{horas}
-\]
-
-Acumular `Wh` en variable `energy_wh_today[casa]`.
-
-### 3.3 Cierre del día
-
-A las **00:00** (hora local Argentina UTC-3 configurable):
-
-1. Persistir registro del día: `{ fecha, casa_id, kwh, imax, iavg }`.
-2. Reiniciar acumuladores diarios.
-3. Ejecutar rotación de archivos > 30 días.
-
----
-
-## 4. Configuración (`config.h` ejemplo)
-
-```cpp
-#define WIFI_SSID       "tu_red"
-#define WIFI_PASSWORD   "tu_clave"
-
-#define V_NOMINAL       220.0f
-#define POWER_FACTOR    0.95f
-
-#define SAMPLE_RATE_HZ  2000
-#define RMS_WINDOW_MS   200
-
-#define TZ_OFFSET_SEC   (-3 * 3600)   // Argentina
-#define NTP_SERVER      "pool.ntp.org"
-
-#define ADC_PIN_CASA1   0
-#define ADC_PIN_CASA2   1
-
-#define BURDEN_OHMS     22.0f
-#define SCT_RATIO       2000.0f
-```
-
----
-
-## 5. Servidor HTTP embebido
-
-### 5.1 Endpoints previstos
-
-Ver detalle en [03-almacenamiento-y-api.md](03-almacenamiento-y-api.md).
-
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| GET | `/` | Dashboard HTML mínimo |
-| GET | `/api/status` | Corriente y potencia instantánea |
-| GET | `/api/daily?casa=1&days=30` | Histórico diario |
-| GET | `/api/today` | Consumo acumulado hoy (ambas casas) |
-| POST | `/api/calibrate` | Ajuste de ganancia (protegido, opcional) |
-
-### 5.2 Diagrama de secuencia (consulta histórico)
-
-```mermaid
-sequenceDiagram
-    participant C as Cliente
-    participant E as ESP32 WebServer
-    participant F as LittleFS
-
-    C->>E: GET /api/daily?casa=1&days=7
-    E->>F: Leer /data/casa1/*.json
-    F-->>E: Registros 7 días
-    E-->>C: 200 application/json
-```
-
----
-
-## 6. Interfaz web mínima (fase 1)
-
-Página servida desde flash (`/index.html` en LittleFS o embebida como `PROGMEM`):
-
-- Tarjetas: **Casa 1** y **Casa 2** — corriente (A), potencia (W), kWh hoy.
-- Gráfico de barras simple (últimos 7–30 días) vía fetch a `/api/daily`.
-- Actualización automática cada 5–10 s (`/api/status`).
-
-No requiere internet; solo LAN.
-
----
-
-## 7. Calibración
-
-1. **Offset**: sin carga, promediar ADC → `cal_offset`.
-2. **Ganancia**: con carga conocida (calentador, etc.), comparar con pinza o medidor comercial → ajustar `cal_gain`.
-3. Guardar constantes en **NVS** (`Preferences`) para sobrevivir reinicios.
-4. Endpoint opcional `POST /api/calibrate` solo en modo instalación (PIN o token).
-
----
-
-## 8. Confiabilidad
-
-| Riesgo | Mitigación |
-|--------|------------|
-| Reinicio ESP | NVS + LittleFS; recuperar día parcial desde último guardado cada 5 min |
-| Pérdida WiFi | Seguir muestreando; reconectar en background |
-| Flash llena | Rotación estricta a 30 días; logs compactos |
-| Hora incorrecta | NTP al boot; RTC opcional |
-
-### Guardado periódico
-
-Cada **5 minutos** escribir snapshot del día en curso:
-
-`/data/casa1_current.json` → evita perder todo el día si hay corte de luz.
-
----
-
-## 9. Herramientas de desarrollo
-
-- **PlatformIO** (recomendado) o Arduino IDE 2.x
-- Board: `esp32-c3-devkitm-1`
-- Partition scheme: **Default 4MB with spiffs** → migrar a **LittleFS** (~1,5 MB para datos)
-- Monitor serie 115200 baud para depuración
-
-### Partition sugerida (platformio.ini)
+### `platformio.ini` (borrador)
 
 ```ini
-board_build.partitions = default.csv
-; o custom: app 1.5MB, littlefs 1.5MB
+[env:esp32-c3-devkitm-1]
+platform = espressif32
+board = esp32-c3-devkitm-1
+framework = arduino
+lib_deps =
+    openenergymonitor/EmonLib
+    bblanchon/ArduinoJson@^7
+monitor_speed = 115200
 ```
 
 ---
 
-## 10. Pruebas de software
+## 6. WiFi
 
-| Prueba | Criterio de éxito |
-|--------|-------------------|
-| Bench sin WiFi | RMS estable con lámpara |
-| WiFi + NTP | Fecha correcta en logs |
-| API `/api/status` | JSON válido, 2 canales |
-| Simular medianoche | Archivo diario creado, contador reiniciado |
-| 30 días simulados | Rotación borra día 31 |
-| Corte alimentación | Recupera kWh parcial del día |
+Patrón Savjee simplificado (sin deep sleep obligatorio):
+
+```cpp
+WiFi.mode(WIFI_STA);
+WiFi.setHostname("esp32-medidor-2casas");
+WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+```
+
+Mostrar IP en Serial al conectar (depuración).
+
+---
+
+## 7. Servidor HTTP (reemplazo de AWS del tutorial)
+
+El tutorial envía 30 lecturas cada 30 s a **AWS IoT**. Este proyecto **guarda en la placa** y expone:
+
+| Ruta | Función |
+|------|---------|
+| `GET /api/status` | W, A y kWh hoy por casa |
+| `GET /api/today` | Totales del día |
+| `GET /api/daily?casa=1&days=30` | Histórico |
+
+Todas las salidas al exterior son **solo JSON por API** (sin interfaz local). Detalle en [03-almacenamiento-y-api.md](03-almacenamiento-y-api.md).
+
+---
+
+## 8. LED de estado (GPIO2)
+
+### Configuración (`config.h`)
+
+```cpp
+#define PIN_LED_STATUS       2
+#define NO_CURRENT_A         0.15f   // Umbral I_rms (A); calibrar en campo
+#define NO_CURRENT_DEBOUNCE_S  30      // Segundos sin corriente antes de LED fijo
+#define WIFI_BLINK_MS          250     // Parpadeo: 250 ms ON / 250 ms OFF
+#define NTP_FAIL_BLINK_MIN     10      // Si NTP falla >10 min con WiFi OK → parpadeo
+```
+
+### Prioridad de estados
+
+```mermaid
+stateDiagram-v2
+    [*] --> Evaluar
+
+    Evaluar --> Parpadeo: red o internet NO OK
+    Evaluar --> FijoOn: red OK y sin corriente en C1 y C2
+    Evaluar --> Apagado: red OK y corriente en C1 o C2
+
+    note right of Parpadeo
+        Más grave: anula fijo/apagado
+    end note
+```
+
+| Estado firmware | Condición | LED |
+|-----------------|-----------|-----|
+| `LED_NET_FAULT` | WiFi desconectado, sin IP, o NTP fallido (opc.) | Parpadeo |
+| `LED_NO_CURRENT` | Red OK; `i1` y `i2` < umbral (debounce) | Fijo ON |
+| `LED_OK` | Red OK; al menos un canal con corriente | OFF |
+
+### Implementación de referencia
+
+```cpp
+enum LedMode { LED_OK, LED_NO_CURRENT, LED_NET_FAULT };
+
+bool redOk() {
+  return WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0);
+}
+
+bool sinCorriente(float i1, float i2) {
+  return i1 < NO_CURRENT_A && i2 < NO_CURRENT_A;
+}
+
+void updateStatusLed(float i1, float i2) {
+  static unsigned long lastBlink = 0;
+  static bool blinkOn = false;
+  static unsigned long debounceStart = 0;
+
+  pinMode(PIN_LED_STATUS, OUTPUT);
+
+  // Prioridad 1: conexión (más grave)
+  if (!redOk() || !ntpOk()) {
+    if (millis() - lastBlink >= WIFI_BLINK_MS) {
+      lastBlink = millis();
+      blinkOn = !blinkOn;
+      digitalWrite(PIN_LED_STATUS, blinkOn ? HIGH : LOW);
+    }
+    return;
+  }
+
+  // Prioridad 2: sin corriente en ambas casas
+  if (sinCorriente(i1, i2)) {
+    if (debounceStart == 0) debounceStart = millis();
+    if (millis() - debounceStart >= NO_CURRENT_DEBOUNCE_S * 1000UL) {
+      digitalWrite(PIN_LED_STATUS, HIGH);
+      return;
+    }
+  } else {
+    debounceStart = 0;
+  }
+
+  // Prioridad 3: todo bien
+  digitalWrite(PIN_LED_STATUS, LOW);
+}
+```
+
+`ntpOk()` devuelve `true` si la hora se sincronizó por NTP en los últimos `NTP_FAIL_BLINK_MIN` minutos (proxy de “hay internet”).
+
+Llamar `updateStatusLed()` en cada `loop()`, **fuera** del bloque de medición de 1 s, para que el parpadeo sea fluido.
+
+El mismo estado se expone en `GET /api/status` como `led_mode`, `red_ok` y `ntp_ok`.
+
+---
+
+## 9. Calibración (como Savjee)
+
+1. Instalar con carga estable (calentador, horno).
+2. Medir corriente real con pinza o medidor de referencia.
+3. Ajustar `CAL_CASA1` y `CAL_CASA2` hasta que `emonN.calcIrms` coincida.
+4. Guardar en **NVS** (`Preferences`) para no perder tras reinicio.
+
+Constante inicial **30** (valor del tutorial); casi seguro habrá que retocarla para SCT-013 **100 A** y tu burden.
+
+---
+
+## 10. Confiabilidad
+
+| Tema | Acción |
+|------|--------|
+| Lecturas erráticas al arranque | Ignorar primeros **10 s** (Savjee) |
+| Reinicio | Snapshot `casaN_current.json` cada 5 min |
+| WiFi caído | Parpadeo LED; seguir midiendo; reconectar en `loop` |
+| Dos `calcIrms` seguidos | Mantener período ≥ 1 s entre rondas |
+
+---
+
+## 11. Pruebas
+
+| # | Prueba | OK si |
+|---|--------|--------|
+| 1 | Un canal, Serial | I_rms estable con lámpara |
+| 2 | Dos canales | C1 y C2 independientes |
+| 3 | 24 h bench | kWh coherente con \(P \times t\) |
+| 4 | API | JSON con 2 casas |
+| 5 | Día 31 simulado | Se borra el más antiguo |
+| 6 | LED | Parpadeo sin WiFi; fijo sin carga; apagado con carga |
+
+---
+
+## 12. Extensión futura (estilo Savjee V2 / cloud)
+
+- MQTT a Home Assistant o InfluxDB (batch de 30 muestras como Savjee).
+- Reconocimiento de patrones por electrodoméstico.
+- Sensor de tensión (ZMPT101B) para \(P = V \times I\) real.
+
+La **v1** no requiere cuenta AWS ni DynamoDB.

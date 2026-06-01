@@ -1,71 +1,72 @@
-# Medidor de corriente — 2 viviendas
+# Medidor de corriente — 2 viviendas, 1 placa
 
-Proyecto IoT para medir el consumo eléctrico de **dos casas** con sensores de corriente inductivos **SCT-013 100 A** y un microcontrolador **ESP32-C3 SuperMini** (16 pines). El dispositivo expone un **servidor HTTP** con mediciones en tiempo real e histórico diario, con **persistencia local de al menos 30 días**.
+Monitor de energía **no invasivo** para dos casas: dos sensores **YHDC SCT-013** (uno por tablero) y **un solo ESP32-C3 SuperMini** que mide, acumula kWh y expone una **API REST (JSON)** por WiFi. Sin pantalla local. Histórico diario persistido **≥ 30 días** en flash.
+
+El diseño sigue el enfoque de [OpenEnergyMonitor](https://openenergymonitor.org/) y el tutorial [DIY Home Energy Monitor (Savjee)](https://savjee.be/2019/07/DIY-home-energy-monitor-with-ESP32/), adaptado a **dos canales** y almacenamiento **local** (sin AWS).
 
 ## Documentación
 
 | Documento | Contenido |
 |-----------|-----------|
-| [docs/01-hardware.md](docs/01-hardware.md) | Esquema eléctrico, lista de materiales, montaje y seguridad |
-| [docs/02-software.md](docs/02-software.md) | Arquitectura de firmware, servidor web, calibración |
-| [docs/03-almacenamiento-y-api.md](docs/03-almacenamiento-y-api.md) | Modelo de datos, API REST, retención de 1 mes |
-| [docs/04-plan-implementacion.md](docs/04-plan-implementacion.md) | Fases, pruebas y checklist |
+| [docs/01-hardware.md](docs/01-hardware.md) | BOM, cableado tipo Savjee, jacks 3,5 mm, 2× front-end |
+| [docs/02-software.md](docs/02-software.md) | **EmonLib**, medición cada 1 s, API REST |
+| [docs/03-almacenamiento-y-api.md](docs/03-almacenamiento-y-api.md) | LittleFS, API REST, retención 1 mes |
+| [docs/04-plan-implementacion.md](docs/04-plan-implementacion.md) | Fases de montaje y firmware |
 
-## Diagrama general del sistema
+## Diagrama del sistema
 
 ```mermaid
 flowchart TB
-    subgraph Casa1["Casa 1 — tablero"]
-        T1["Cable fase<br/>(solo pasante)"]
-        SCT1["SCT-013 #1"]
-        T1 --> SCT1
+    subgraph C1["Casa 1"]
+        W1["Fase del tablero"] --> SCT1["SCT-013 + jack 3,5 mm"]
     end
 
-    subgraph Casa2["Casa 2 — tablero"]
-        T2["Cable fase"]
-        SCT2["SCT-013 #2"]
-        T2 --> SCT2
+    subgraph C2["Casa 2"]
+        W2["Fase del tablero"] --> SCT2["SCT-013 + jack 3,5 mm"]
     end
 
-    subgraph Nodo["ESP32-C3 SuperMini"]
-        ADC1["ADC — canal Casa 1"]
-        ADC2["ADC — canal Casa 2"]
-        FW["Firmware<br/>muestreo RMS + energía"]
-        FS["LittleFS<br/>histórico 30 días"]
-        HTTP["Servidor HTTP<br/>puerto 80"]
-        FW --> FS
-        FW --> HTTP
+    subgraph Placa["Una placa ESP32-C3"]
+        FE["2× circuito burden + bias<br/>OpenEnergyMonitor"]
+        EM["EmonLib × 2<br/>calcIrms cada 1 s"]
+        FS["LittleFS<br/>30 días / casa"]
+        HTTP["Servidor HTTP :80"]
+        FE --> EM --> FS
+        EM --> HTTP
     end
 
-  SCT1 -->|señal AC condicionada| ADC1
-  SCT2 -->|señal AC condicionada| ADC2
+    SCT1 --> FE
+    SCT2 --> FE
 
-    subgraph Clientes["Clientes"]
-        BROWSER["Navegador / app"]
-        SCRIPT["Script consulta"]
-    end
-
-    BROWSER -->|WiFi LAN| HTTP
-    SCRIPT -->|WiFi LAN| HTTP
+    HTTP --> LAN["WiFi LAN"]
+    LAN --> PC["Cliente API<br/>curl / app / HA"]
 ```
 
-## Decisión de plataforma
+## Piezas clave (resumen)
 
-| Criterio | ESP32-C3 SuperMini (16 pines) | ESP32 clásico NodeMCU |
-|----------|-------------------------------|------------------------|
-| Costo | Menor | Mayor |
-| Pines / ADC | 2 ADC útiles (suficiente para 2 SCT) | Más ADC y GPIO |
-| WiFi | 802.11 b/g/n | 802.11 b/g/n |
-| Consumo | Menor | Mayor |
-| **Recomendación** | **Sí — opción preferida** | Reserva si necesitás SD externa o más sensores |
+| Pieza | Rol |
+|-------|-----|
+| **ESP32-C3 SuperMini** | Único MCU: 2 entradas ADC, WiFi, servidor |
+| **2× SCT-013 100 A** | Transformador de corriente; pinza en la fase de cada casa |
+| **EmonLib** | Convierte la onda AC del ADC en **I_rms (A)** |
+| **Burden + divisor** | Igual que en el tutorial Savjee (ver hardware) |
+| **LittleFS** | kWh por día y por casa durante 1 mes |
+| **LED rojo (GPIO2)** | Parpadeo = sin red; fijo = sin corriente; apagado = OK |
 
-## Resumen de requisitos cubiertos
+## Diferencias respecto al tutorial original
 
-- **2 medidas independientes** (una por casa).
-- **Servidor embebido** con estado actual e histórico diario.
-- **Persistencia ≥ 1 mes** en flash (LittleFS), con agregados por día (kWh).
-- **Sin dependencia de nube** en la versión base (opcional: backup MQTT más adelante).
+| Tutorial Savjee (1 vivienda) | Este proyecto |
+|------------------------------|---------------|
+| 1× SCT, 1× ADC (GPIO 34) | **2× SCT**, GPIO0 y GPIO1 |
+| Envío a **AWS IoT** (MQTT) | **API REST** (JSON) + archivos en flash |
+| LCD I2C local | **Sin pantalla**; solo API por WiFi |
+| SCT-013-**030** (30 A) | SCT-013 **100 A / 50 mA** (ajuste de burden y calibración) |
+
+## Referencias
+
+- [OpenEnergyMonitor — CT sensors](https://learn.openenergymonitor.org/electricity-monitoring/ct-sensors)
+- [Savjee — DIY Home Energy Monitor](https://savjee.be/2019/07/DIY-home-energy-monitor-with-ESP32/)
+- [EmonLib](https://github.com/openenergymonitor/EmonLib)
 
 ## Próximo paso
 
-Seguir el [plan de implementación](docs/04-plan-implementacion.md) empezando por el banco de pruebas en mesa (sin tensión de red) y luego el montaje con SCT en un cable de prueba.
+[Plan de implementación](docs/04-plan-implementacion.md): protoboard → un canal con EmonLib → dos canales → WiFi + API.

@@ -1,35 +1,43 @@
-MEDIDOR 2 CASAS — ESP32-C3 + 2× SCT-013
-=========================================
+MEDIDOR 2 CASAS — 1× ESP32-C3 + 2× SCT-013 (estilo Savjee / OpenEnergyMonitor)
+==================================================================================
 
-  CASA 1 (tablero)                         CASA 2 (tablero)
-  ┌──────────────┐                        ┌──────────────┐
-  │  Fase ───┐   │                        │  Fase ───┐   │
-  │          │   │                        │          │   │
-  │    ┌─────┴───┴─────┐                  │    ┌─────┴───┴─────┐
-  │    │  SCT-013 #1   │                  │    │  SCT-013 #2   │
-  │    │  (1 vuelta)   │                  │    │  (1 vuelta)   │
-  │    └───────┬───────┘                  │    └───────┬───────┘
-  └────────────┼──────────────────────────┴────────────┼──────────
-               │ secundario                           │ secundario
-               ▼                                      ▼
-        ┌─────────────┐                        ┌─────────────┐
-        │ Burden 22Ω  │                        │ Burden 22Ω  │
-        │ + bias 1.65V│                        │ + bias 1.65V│
-        └──────┬──────┘                        └──────┬──────┘
-               │                                      │
-               ▼ GPIO0 (ADC)                         ▼ GPIO1 (ADC)
-        ┌──────────────────────────────────────────────────────┐
-        │              ESP32-C3 SuperMini                        │
-        │   [WiFi]  [LittleFS flash interna]                     │
-        └──────────────────────────┬───────────────────────────┘
-                                   │ WiFi 2.4 GHz
-                                   ▼
-                            ┌─────────────┐
-                            │   Router    │
-                            │  192.168.x  │
-                            └──────┬──────┘
-                                   │
-                    ┌──────────────┼──────────────┐
-                    ▼              ▼              ▼
-              Navegador      curl / scripts    (futuro: HA)
+  TABLERO CASA 1                    TABLERO CASA 2
+  ┌─────────────┐                   ┌─────────────┐
+  │ Fase ──┐    │                   │ Fase ──┐    │
+  │    [SCT-013 #1]                 │    [SCT-013 #2]
+  │        │    │                   │        │    │
+  └────────┼────┘                   └────────┼────┘
+           │ cable 3,5 mm                      │ cable 3,5 mm
+           ▼                                   ▼
+      ┌─────────┐                         ┌─────────┐
+      │ Jack J1 │                         │ Jack J2 │
+      └───┬─────┘                         └───┬─────┘
+          │  Burden Rb + R1/R2 + C 10µF       │
+          │         (circuito ×2)             │
+          ▼                                   ▼
+      GPIO0 (ADC)                         GPIO1 (ADC)
+          │                                   │
+          └──────────────┬────────────────────┘
+                         ▼
+              ┌──────────────────────┐
+              │  ESP32-C3 SuperMini  │  ← UNA SOLA PLACA
+              │  EmonLib + WiFi      │
+              │  LittleFS + HTTP :80 │
+              │  LED rojo → GPIO2    │
+              └──────────┬───────────┘
 
+  LED rojo (estado):
+    - Parpadeo  → sin WiFi / sin internet (prioridad máxima)
+    - Fijo ON   → red OK, sin corriente en Casa 1 y Casa 2
+    - Apagado   → red OK y hay corriente en al menos una casa
+                         │ WiFi
+                         ▼
+                    [ Router LAN ]
+                         │
+              Cliente API (curl, app, etc.) → /api/status
+
+  Salida: solo API HTTP (JSON) por WiFi — sin pantalla local
+
+  Referencia cableado por canal (Savjee):
+      Jack SCT ── Burden ── nodo ADC ── GPIO
+      3.3V ── R1 ── nodo ADC ── R2 ── GND   (R1 = R2)

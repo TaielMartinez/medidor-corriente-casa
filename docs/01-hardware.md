@@ -1,191 +1,227 @@
 # Hardware
 
+Basado en el cableado de [OpenEnergyMonitor](https://learn.openenergymonitor.org/electricity-monitoring/ct-sensors/connecting) y en el artículo [Savjee — DIY Home Energy Monitor](https://savjee.be/2019/07/DIY-home-energy-monitor-with-ESP32/). **Una sola placa ESP32-C3** con **dos circuitos idénticos** (uno por casa).
+
+---
+
 ## 1. Lista de materiales (BOM)
 
+| Cant. | Componente | Notas |
+|------:|------------|-------|
+| 1 | **ESP32-C3 SuperMini** (16 pines) | Único microcontrolador del proyecto |
+| 2 | **SCT-013 100 A / 50 mA** (YHDC) | Uno por casa; conector **3,5 mm** en el cable |
+| 2 | **Jack hembra 3,5 mm** (estéreo) | En la placa; permite desconectar cada SCT |
+| 2 | **Resistencia de carga (burden)** | Ver §3; típ. **22 Ω** (1 W) para variant 100 A |
+| 2 | **Condensador 10 µF** | En el nodo ADC (como en Savjee) |
+| 4 | **Resistencias R1, R2** iguales | **10 kΩ–100 kΩ** (Savjee usa 2× 100 kΩ); R1=R2 por canal |
+| 1 | **Protoboard o PCB** | Dos canales lado a lado |
+| 1 | **Conectores hembra** para el ESP32 | No soldar el ESP directo (recomendación Savjee) |
+| 1 | **LED rojo 5 mm** | Indicador de estado en caja |
+| 1 | **Resistencia 220 Ω** (1/4 W) | Limitación de corriente del LED |
+| — | Cables, caja | Según instalación |
 
-| Cant. | Componente                                       | Notas                                                              |
-| ----- | ------------------------------------------------ | ------------------------------------------------------------------ |
-| 1     | **NodeMCU ESP32-C3 SuperMini** (16 pines, USB-C) | Controlador principal + WiFi                                       |
-| 2     | **SCT-013 100 A / 50 mA**                        | Uno por casa; salida de corriente proporcional                     |
-| 2     | **Resistencia de carga (burden)** ~22–33 Ω, 1 W  | Convierte corriente del SCT en tensión medible                     |
-| 2     | **Condensador electrolítico 10 µF**              | Filtro en la etapa de condicionamiento                             |
-| 4     | **Resistencia 10 kΩ** (1/4 W)                    | Divisor / offset para centrar señal en ~1,65 V                     |
-| 2     | **Diodos Schottky 1N5819** (opcional)            | Protección ante picos en entrada ADC                               |
-| 1     | **Protoboard o PCB**                             | Montaje del front-end analógico                                    |
-| —     | Cables, borneras, funda termorretráctil          | Según instalación                                                  |
+### Opcional
 
-
-### Opcional (fase 2)
-
-
-| Componente                      | Uso                                                |
-| ------------------------------- | -------------------------------------------------- |
-| Módulo RTC DS3231               | Marca temporal si el ESP pierde hora tras reinicio |
-| Tarjeta microSD + adaptador SPI | Backup o histórico > 30 días sin reescribir flash  |
-| Caja IP65                       | Instalación en tablero o exterior                  |
-
+| Componente | Uso |
+|------------|-----|
+| RTC DS3231 | Hora si NTP no está disponible |
+| Caja con 2 orificios para jacks | Montaje final |
 
 ---
 
-## 2. Principio del SCT-013 100 A / 50 mA
+## 2. Instalación del SCT (por casa)
 
-- Relación de transformación aproximada: **1:2000** (100 A primario → 50 mA secundario).
-- El secundario es **galvánicamente aislado** del conductor medido: no se corta la fase; el cable pasa por el núcleo del sensor.
-- **Nunca** dejar el secundario en circuito abierto con carga conectada: usar siempre la resistencia de carga.
+1. Identificar el **conductor de fase** en el tablero de esa casa (cable que entra al automático general).
+2. Abrir el núcleo del SCT, pasar **solo ese cable** (una vuelta) y cerrar hasta el clic.
+3. Conectar el cable del sensor al **jack 3,5 mm** de la placa etiquetado *Casa 1* o *Casa 2*.
+4. **No cortar** la línea: medición no invasiva.
 
-Corriente secundaria aproximada:
-
-
-I_{sec} = \frac{I_{primario}}{2000}
-
-
-Tensión en la burden (ej. R = 22 Ω):
-
-
-V_{burden} = I_{sec} \times R
-
-
-Ejemplo: 20 A en la casa → 10 mA secundario → **0,22 V** pico (antes de offset y amplificación).
+> En el tutorial original se pinza el cable principal del departamento. Aquí hay **dos tableros** (dos casas): cada SCT va en su tablero; ambos llegan a la **misma placa** ESP32.
 
 ---
 
-## 3. Etapa de condicionamiento (por canal)
+## 3. Circuito de condicionamiento (por canal)
 
-Cada SCT necesita el mismo circuito. La señal es **AC** centrada para el ADC del ESP32 (0–3,3 V, referencia 3,3 V).
+Réplica del esquema Savjee / OpenEnergyMonitor. **R1 y R2 deben ser iguales** (cualquier valor entre 10 kΩ y 470 kΩ; 100 kΩ es un buen punto de partida).
 
 ```mermaid
 flowchart LR
-    SCT["SCT-013<br/>secundario"]
-    Rb["Burden R<br/>22–33 Ω"]
-    C["C 10 µF<br/>acoplamiento"]
-    DIV["Divisor + offset<br/>→ ~1,65 V DC"]
+    JACK["Jack 3,5 mm<br/>desde SCT"]
+    BUR["Burden Rb"]
+    MID["Nodo ADC<br/>+ C 10µF"]
+    R1["R1"]
+    R2["R2"]
     ADC["GPIO ADC<br/>ESP32-C3"]
 
-    SCT --> Rb --> C --> DIV --> ADC
+    JACK --> BUR --> MID --> ADC
+    R1 --> MID
+    MID --> R2
+    R1 --- V33["3.3 V"]
+    R2 --- GND["GND"]
 ```
 
-
-
-### Esquema conceptual (un canal)
+### Esquema textual (un canal — Casa 1 o Casa 2)
 
 ```
-SCT-013 (secundario)
-    |
-   [Rb 22Ω] ----+---- ADC (GPIO0 o GPIO1 en C3)
-                |
-              [C 10µF]
-                |
-    3.3V --[10k]--+--[10k]-- GND   (bias ~1.65V en el nodo ADC)
+Jack 3,5 mm (secundario SCT)
+    |-------- [Burden Rb] --------|
+    |                              |
+    +-------- nodo ADC --------+---→ GPIO (ADC)
+    |              |           |
+    |            [10 µF]       |
+    |              |           |
+   3.3V ---[R1]---+---[R2]--- GND
+         (R1 = R2, ej. 100k)
 ```
 
-**Pines ADC sugeridos en ESP32-C3 SuperMini:**
+- **Burden (`Rb`)**: convierte la corriente del secundario en tensión. Para **SCT-013 100 A / 50 mA**, OpenEnergyMonitor suele usar **22 Ω** (comprobar que el pico no sature el ADC a tu corriente máxima).
+- **R1, R2**: polarizan el punto medio (~1,65 V en 3,3 V).
+- **C 10 µF**: filtra / estabiliza el nodo (como en Savjee).
 
+### Burden para SCT-013 100 A
 
-| Canal  | GPIO  | ADC      |
-| ------ | ----- | -------- |
-| Casa 1 | GPIO0 | ADC1_CH0 |
-| Casa 2 | GPIO1 | ADC1_CH1 |
-
-
-> Verificar el pinout exacto de tu placa; algunas variantes marcan los pines en la serigrafía.
-
-### Ajuste de la burden
-
-- Objetivo: pico de señal **< 1,0 V** respecto al offset (1,65 V) con la corriente máxima esperada en casa.
-- Si la señal satura el ADC, subir R (ej. 33 Ω) o reducir ganancia en software.
-- Calibrar con pinza amperimétrica o medidor de referencia.
+| Parámetro | Valor |
+|-----------|--------|
+| Relación | ~1:2000 (100 A → 50 mA) |
+| Rb típica | **22 Ω** (1 W) |
+| Ajuste | Si el ADC satura, subir Rb (33 Ω) o bajar `calibration` en EmonLib |
 
 ---
 
-## 4. Diagrama de conexión completo
+## 4. Una placa, dos casas — pinout
+
+| Casa | Jack en placa | GPIO ESP32-C3 | Uso |
+|------|---------------|---------------|-----|
+| Casa 1 | `J1` | **GPIO0** | `emon1.current(0, cal1)` |
+| Casa 2 | `J2` | **GPIO1** | `emon2.current(1, cal2)` |
+| LED estado | — | **GPIO2** | LED rojo externo (ver §5) |
+
+**GND común** entre ambos front-ends y el ESP32.
+
+> Verificar el pinout impreso en tu SuperMini; algunos clones rotan numeración.
+
+### LED integrado vs LED rojo externo
+
+Muchas placas **ESP32-C3 SuperMini** traen un LED **integrado** (suele ser **GPIO8**, a veces **activo en bajo**). Sirve para pruebas de placa, pero:
+
+- Es pequeño y queda tapado dentro de la caja.
+- No es rojo ni visible en la instalación.
+
+Por eso el proyecto usa un **LED rojo externo en GPIO2**, montado en la carcasa y visible desde fuera.
+
+### Por qué una sola placa alcanza
+
+- Solo se necesitan **2 entradas ADC** analógicas.
+- EmonLib procesa un canal por vez (`calcIrms`).
+- WiFi y servidor HTTP corren en el mismo chip.
+- El histórico de 30 días ocupa pocos KB en flash (no hace falta segunda placa).
+
+---
+
+## 5. LED rojo de estado (GPIO2)
+
+Indicador **sin pantalla**: solo este LED resume el estado del equipo.
+
+### Cableado
+
+```
+GPIO2 ──[ 220 Ω ]──|>|── GND
+                    LED rojo (ánodo hacia GPIO2, cátodo a GND)
+```
+
+Lógica en firmware: **activo en alto** (`HIGH` = encendido).
+
+### Comportamiento (prioridad)
+
+| Prioridad | Condición | LED rojo |
+|----------:|-----------|----------|
+| **1 (más grave)** | Sin WiFi o sin IP (no hay red / no llega la API) | **Parpadeo** (~2 Hz) |
+| 2 | Red OK, pero **sin corriente** en ambas casas | **Fijo encendido** |
+| 3 | Red OK y corriente en al menos una casa | **Apagado** |
+
+> Si hay fallo de red **y** sin corriente a la vez, gana el **parpadeo** (conexión es el problema más grave).
+
+“Sin corriente” = \(I_{rms}\) de Casa 1 **y** Casa 2 por debajo de un umbral (ej. **0,15 A**), durante unos segundos, para filtrar ruido del ADC.
+
+“Sin conexión” = `WiFi.status() != WL_CONNECTED` o sin IP asignada. Opcional en firmware: si hay WiFi pero **NTP no sincroniza** en X minutos, tratar también como fallo de conectividad a internet y **parpadear**.
+
+---
+
+## 6. Diagrama físico completo
 
 ```mermaid
 flowchart TB
-    subgraph Red1["Instalación Casa 1"]
-        F1["Conductor fase<br/>(1 vuelta por núcleo SCT)"]
+    subgraph Tablero1["Tablero Casa 1"]
+        F1["Fase"]
+        SCT1["SCT-013"]
+        F1 --> SCT1
     end
 
-    subgraph Red2["Instalación Casa 2"]
-        F2["Conductor fase"]
+    subgraph Tablero2["Tablero Casa 2"]
+        F2["Fase"]
+        SCT2["SCT-013"]
+        F2 --> SCT2
     end
 
-    subgraph FE1["Front-end Casa 1"]
-        S1["SCT-013 #1"]
-        E1["Burden + bias + ADC"]
+    subgraph PCB["Placa única"]
+        J1["Jack J1"]
+        J2["Jack J2"]
+        C1["Circuito burden+bias"]
+        C2["Circuito burden+bias"]
+        ESP["ESP32-C3"]
+        LED["LED rojo GPIO2"]
+        J1 --> C1 --> ESP
+        J2 --> C2 --> ESP
+        ESP --> LED
     end
 
-    subgraph FE2["Front-end Casa 2"]
-        S2["SCT-013 #2"]
-        E2["Burden + bias + ADC"]
-    end
+    SCT1 -->|cable 3,5 mm| J1
+    SCT2 -->|cable 3,5 mm| J2
 
-    subgraph MCU["ESP32-C3 SuperMini"]
-        ESP["MCU + WiFi"]
-    end
-
-    F1 --> S1 --> E1 --> ESP
-    F2 --> S2 --> E2 --> ESP
-
-    subgraph LAN["Red local"]
-        AP["Router WiFi"]
-    end
-
-    ESP <-->|802.11| AP
+    ESP --> WiFi["Router WiFi"]
 ```
 
+### Montaje recomendado (orden Savjee)
 
-
-### Cableado físico recomendado
-
-
-| Desde             | Hacia                   | Cable                        |
-| ----------------- | ----------------------- | ---------------------------- |
-| Secundario SCT #1 | Entrada circuito Casa 1 | Par trenzado corto (< 30 cm) |
-| Secundario SCT #2 | Entrada circuito Casa 2 | Idem                         |
-| 3,3 V / GND ESP   | Front-ends              | GND común único              |
-
+1. **Breadboard**: un canal + lectura Serial (depuración).
+2. **Protoboard**: dos canales + jacks; ESP en **zócalos hembra**.
+3. **Instalación**: SCT en cada tablero; cables largos solo en baja tensión (salida del jack).
 
 ---
 
-## 5. Seguridad e instalación
+## 7. Seguridad
 
-1. **Solo personal calificado** debe abrir tableros y pasar cables por los SCT.
-2. Medir **una fase por casa** (monofásico) o adaptar firmware a **2 SCT por fase** si es trifásico (fuera del alcance inicial).
-3. Mantener el ESP32 y el front-end **fuera** del borne de línea; señales de baja tensión únicamente.
-4. Colocar fusible o automático dedicado si el equipo queda fijo en el tablero.
-5. Etiquetar claramente: *Casa 1 / Casa 2* en cada SCT.
-
----
-
-## 6. Dimensionamiento eléctrico (referencia Argentina 220 V)
-
-
-| Magnitud           | Fórmula                                               | Ejemplo                                  |
-| ------------------ | ----------------------------------------------------- | ---------------------------------------- |
-| Potencia aparente  | P = V \times I                                        | 220 V × 10 A ≈ 2,2 kW                    |
-| Energía diaria     | E = P \times t                                        | 2,2 kW × 24 h = 52,8 kWh/día             |
-| Factor de potencia | Incluir `cos φ` en firmware si se mide solo corriente | P_{real} = V \times I \times \cos\varphi |
-
-
-Sin medición de tensión, el firmware usará **tensión nominal configurable** (ej. 220 V) y opcionalmente factor de potencia por defecto (0,9–1,0) hasta instalar sensor de tensión (SCT-013 + divisor resistivo en fase, fase 2).
+1. Solo **personal calificado** en tableros eléctricos.
+2. **Una fase por casa** (monofásico 220 V).
+3. Secundario del SCT **siempre** con burden conectada (nunca abierto en vacío con carga inductiva).
+4. ESP y protoboard fuera de bornes de línea; señales ≤ 3,3 V.
+5. Etiquetar jacks: *Casa 1*, *Casa 2*.
 
 ---
 
-## 7. Montaje mecánico
+## 8. Potencia y energía (referencia)
 
-1. Imprimir o fijar PCB/protoboard en caja con orificios para cables SCT.
-2. Pasar **un solo** conductor por el núcleo (fase); no incluir neutro en el mismo núcleo si se busca medir corriente de línea.
-3. Cerrar el núcleo del SCT hasta el clic; sin holgura.
-4. Alejar el ESP32 de fuentes de calor del tablero; ventilación en caja.
+Sin medidor de tensión en la fase (como Savjee):
+
+\[
+P\,(W) = I_{rms} \times V_{red}
+\]
+
+\[
+kWh_{día} = \sum_{cada\;1s} \frac{P}{3600 \times 1000}
+\]
+
+`V_red` configurable en firmware (ej. **220 V** en Argentina).
 
 ---
 
-## 8. Checklist hardware
+## 9. Checklist hardware
 
-- Dos SCT-013 identificados (Casa 1 / Casa 2)
-- Dos circuitos burden + bias probados con multímetro (offset ~1,65 V sin carga)
-- ESP32-C3 programable y operativo
-- Señal senoidal visible en ADC con carga de prueba (lámpara o resistencia)
-- WiFi conecta a la red doméstica
-- Caja y etiquetas instaladas
-
+- [ ] Dos SCT con jack; dos jacks hembra en la placa
+- [ ] Dos circuitos idénticos (Rb, R1=R2, C 10 µF)
+- [ ] Offset ~1,65 V en cada nodo ADC sin carga
+- [ ] LED rojo + 220 Ω en **GPIO2**, visible en la caja
+- [ ] ESP32-C3 en zócalos; programable
+- [ ] Prueba con carga conocida en **un** canal antes de instalar el segundo SCT
+- [ ] WiFi: hostname sugerido `esp32-medidor-2casas`
+- [ ] Probar LED: parpadeo con WiFi apagado; fijo sin carga; apagado con carga

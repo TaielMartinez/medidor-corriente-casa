@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Monitor /actual/1</title>
+  <style>
+    :root {
+      font-family: system-ui, sans-serif;
+      background: #0f1419;
+      color: #e7ecf3;
+    }
+    body {
+      max-width: 40rem;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+    label { display: block; margin-top: 1rem; font-size: 0.9rem; color: #9aa7b5; }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 0.35rem;
+      padding: 0.6rem 0.75rem;
+      border: 1px solid #2a3544;
+      border-radius: 6px;
+      background: #1a2332;
+      color: inherit;
+    }
+    .panel {
+      margin-top: 1.5rem;
+      padding: 1rem 1.25rem;
+      border-radius: 8px;
+      background: #1a2332;
+      border: 1px solid #2a3544;
+    }
+    .value { font-size: 1.75rem; font-weight: 600; margin: 0.25rem 0; }
+    .meta { font-size: 0.85rem; color: #9aa7b5; }
+    .error { color: #f87171; }
+    .ok { color: #4ade80; }
+    button {
+      margin-top: 1rem;
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 6px;
+      background: #3b82f6;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    pre {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      overflow-x: auto;
+      font-size: 0.8rem;
+      background: #0f1419;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Monitor ESP32</h1>
+  <p class="meta">Consulta la URL cada 1 segundo. Abrí este archivo en el navegador (misma red que el ESP).</p>
+
+  <label>
+    URL
+    <input type="url" id="url" value="http://192.168.0.236/actual/1" />
+  </label>
+
+  <button type="button" id="toggle">Pausar</button>
+
+  <div class="panel">
+    <div class="meta">Estado</div>
+    <div id="status" class="value">—</div>
+    <div class="meta" id="time">Última actualización: —</div>
+  </div>
+
+  <div class="panel">
+    <div class="meta">Corriente (i_rms_a)</div>
+    <div id="amps" class="value">—</div>
+    <div class="meta">Potencia estimada (p_w)</div>
+    <div id="watts" class="value" style="font-size:1.25rem">—</div>
+  </div>
+
+  <pre id="raw">{}</pre>
+
+  <script>
+    const urlInput = document.getElementById("url");
+    const statusEl = document.getElementById("status");
+    const timeEl = document.getElementById("time");
+    const ampsEl = document.getElementById("amps");
+    const wattsEl = document.getElementById("watts");
+    const rawEl = document.getElementById("raw");
+    const toggleBtn = document.getElementById("toggle");
+
+    let running = true;
+    let timer = null;
+
+    async function poll() {
+      const url = urlInput.value.trim();
+      if (!url) return;
+
+      try {
+        const res = await fetch(url, { cache: "no-store" });
+        const text = await res.text();
+        rawEl.textContent = text;
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const data = JSON.parse(text);
+        const i = Number(data.i_rms_a);
+        const p = Number(data.p_w);
+
+        ampsEl.textContent = Number.isFinite(i) ? `${i.toFixed(3)} A` : "—";
+        wattsEl.textContent = Number.isFinite(p) ? `${p.toFixed(1)} W` : "—";
+        statusEl.textContent = "OK";
+        statusEl.className = "value ok";
+      } catch (err) {
+        statusEl.textContent = err.message || "Error";
+        statusEl.className = "value error";
+        ampsEl.textContent = "—";
+        wattsEl.textContent = "—";
+      }
+
+      timeEl.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
+    }
+
+    function start() {
+      if (timer) clearInterval(timer);
+      poll();
+      timer = setInterval(poll, 1000);
+    }
+
+    toggleBtn.addEventListener("click", () => {
+      running = !running;
+      toggleBtn.textContent = running ? "Pausar" : "Reanudar";
+      if (running) start();
+      else clearInterval(timer);
+    });
+
+    urlInput.addEventListener("change", () => {
+      if (running) start();
+    });
+
+    start();
+  </script>
+</body>
+</html>
